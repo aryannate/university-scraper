@@ -1,5 +1,5 @@
 # save as scraper_service.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
@@ -7,6 +7,7 @@ import re
 import time
 from typing import List, Optional, Dict
 import logging
+import json
 
 # -------------------------------
 # Logging setup
@@ -98,13 +99,13 @@ def extract_snippets(html_text: str) -> List[str]:
         t = tag.get_text(separator=" ", strip=True)
         if not t:
             continue
-        if any(k.lower() in t.lower() for k in KEYWORDS):
-            texts.append(t)
-            sib = tag.find_next_sibling()
-            if sib:
-                s = sib.get_text(separator=" ", strip=True)
-                if s and len(s) < 1000:
-                    texts.append(s)
+        # Keep all text (no filtering)
+        texts.append(t)
+        sib = tag.find_next_sibling()
+        if sib:
+            s = sib.get_text(separator=" ", strip=True)
+            if s and len(s) < 1000:
+                texts.append(s)
     # dedupe
     unique = []
     for s in texts:
@@ -116,21 +117,35 @@ def extract_snippets(html_text: str) -> List[str]:
 NUM_RE = re.compile(r"\b(GRE|GMAT)\b[^0-9]{0,20}(\d{2,3})", re.IGNORECASE)
 
 # -------------------------------
-# Scrape endpoint
+# Scrape endpoint with optional raw JSON parsing
 # -------------------------------
 @app.post("/scrape", response_model=ScrapeResponse)
-def scrape(req: ScrapeRequest):
-    logger.info(f"Received request: {req.json()}")
-    
-    cache_key = f"{req.university}|{req.program}"
+async def scrape(req: Request):
+    raw_body = await req.body()
+    raw_text = raw_body.decode("utf-8").strip()
+
+    # Handle n8n leading = sign
+    if raw_text.startswith('='):
+        raw_text = raw_text[1:]
+
+    try:
+        data_dict = json.loads(raw_text)
+        req_data = ScrapeRequest(**data_dict)
+    except Exception as e:
+        logger.error(f"Failed to parse request JSON: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+
+    logger.info(f"Received request: {req_data.json()}")
+
+    cache_key = f"{req_data.university}|{req_data.program}"
     cached = cache_get(cache_key)
     if cached:
         logger.info(f"Returning cached result for {cache_key}")
         return cached
 
-    query = f"site:.edu \"{req.university}\" \"{req.program}\" admissions GRE GMAT"
+    query = f"site:.edu \"{req_data.university}\" \"{req_data.program}\" admissions GRE GMAT"
     try:
-        urls = google_cse_search(query, num=req.max_results)
+        urls = google_cse_search(query, num=req_data.max_results)
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search error: {e}")
@@ -150,7 +165,6 @@ def scrape(req: ScrapeRequest):
         try:
             html = fetch_url(url)
             extracted = extract_snippets(html)
-            # use all extracted snippets, don't filter further
             if extracted:
                 snippets.extend(extracted)
                 source_map[url] = extracted
@@ -159,7 +173,7 @@ def scrape(req: ScrapeRequest):
             continue
 
     result = {
-        "dataFound": bool(urls),  # True if any URL found
+        "dataFound": bool(urls),
         "sourceURLs": list(source_map.keys()),
         "snippets": snippets[:10],  # limit size
         "rawHTML": None
