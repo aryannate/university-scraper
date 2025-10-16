@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # -------------------------------
-# CONFIG - replace placeholders
+# CONFIG - preserve your Gemini key and CSE ID
 # -------------------------------
 GOOGLE_CSE_API = "https://www.googleapis.com/customsearch/v1"
-GOOGLE_API_KEY = "AIzaSyD5Cqp1faiTxm9DqKGgNDIxqnn1vaTszH0"  # replace with your key
-GOOGLE_CX = "54f975bde5a684412"     # replace with your search engine ID
+GOOGLE_API_KEY = "AIzaSyD5Cqp1faiTxm9DqKGgNDIxqnn1vaTszH0"
+GOOGLE_CX = "54f975bde5a684412"
 USER_AGENT = "Mozilla/5.0 (compatible; UniversityScraper/1.0)"
 headers = {"User-Agent": USER_AGENT}
 
@@ -44,7 +44,7 @@ class ScrapeResponse(BaseModel):
     rawHTML: Optional[Dict] = None
 
 # -------------------------------
-# Regex patterns for numeric scores
+# Regex patterns for numeric scores and work experience
 # -------------------------------
 EXAM_REGEX = re.compile(
     r"\b(GRE|GMAT|TOEFL|IELTS|GATE|CAT|SAT|ACT)\b[^0-9]{0,20}(\d{2,3}(-\d{2,3})?)", re.IGNORECASE
@@ -55,6 +55,16 @@ WORK_EXP_REGEX = re.compile(
 KEYWORDS = ["GRE", "GMAT", "TOEFL", "IELTS", "GATE", "CAT", "SAT", "ACT", 
             "English language", "admission requirement", "admissions requirements",
             "work experience", "professional experience", "internship","annual fees","tuition fees"]
+
+# -------------------------------
+# Map universities to official domains for strict validation
+# -------------------------------
+UNIVERSITY_DOMAINS = {
+    "Monash University": "monash.edu",
+    "University of Washington": "uw.edu",
+    "UH Manoa": "manoa.hawaii.edu",
+    # Add more universities as needed
+}
 
 # -------------------------------
 # Google CSE search
@@ -71,7 +81,7 @@ def google_cse_search(query: str, num: int = 5) -> List[str]:
     return urls
 
 # -------------------------------
-# Fetch webpage
+# Fetch webpage (skip PDFs)
 # -------------------------------
 def fetch_url(url: str, timeout: int = 10) -> str:
     if url.lower().endswith(".pdf"):
@@ -94,9 +104,7 @@ def extract_snippets(html_text: str, max_snippets: int = 10) -> List[str]:
         if not text:
             continue
         if any(k.lower() in text.lower() for k in KEYWORDS):
-            # capture the line itself
             snippet = text
-            # include next sibling for context
             sib = tag.find_next_sibling()
             if sib:
                 sib_text = sib.get_text(separator=" ", strip=True)
@@ -107,7 +115,7 @@ def extract_snippets(html_text: str, max_snippets: int = 10) -> List[str]:
         if len(snippets) >= max_snippets:
             break
 
-    # Extract numeric exam scores
+    # Extract numeric exam scores and work experience
     numeric_snippets = []
     for snip in snippets:
         exams = EXAM_REGEX.findall(snip)
@@ -115,7 +123,7 @@ def extract_snippets(html_text: str, max_snippets: int = 10) -> List[str]:
         if exams or work_exp:
             numeric_snippets.append(snip)
 
-    # deduplicate
+    # Deduplicate
     unique_snippets = []
     for s in numeric_snippets:
         if s not in unique_snippets:
@@ -144,30 +152,39 @@ async def scrape(req: Request):
 
     logger.info(f"Received request: {req_data.json()}")
 
-    query = f"site:.edu \"{req_data.university}\" \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
+    university_domain = UNIVERSITY_DOMAINS.get(req_data.university)
+    if not university_domain:
+        logger.warning(f"No domain found for university {req_data.university}, proceeding without strict domain filtering.")
+        university_domain = ""
+
+    query = f"site:{university_domain} \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
     try:
         urls = google_cse_search(query, num=req_data.max_results)
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search error: {e}")
 
-    # Keep only relevant educational pages, skip PDFs
-    def keep(url: str) -> bool:
+    # Filter URLs: must belong to university domain and skip PDFs
+    filtered_urls = []
+    for url in urls:
         lower = url.lower()
+        if university_domain and university_domain not in lower:
+            continue
         if any(bad in lower for bad in ["login", "apply", "register", "contact"]):
-            return False
+            continue
         if lower.endswith(".pdf"):
-            return False
-        return any(domain in lower for domain in [".edu", ".ac.", ".edu.au", ".ac.uk", ".edu.ca"])
+            continue
+        filtered_urls.append(url)
 
-    urls = [u for u in urls if u and keep(u)]
-    logger.info(f"Filtered URLs: {urls}")
+    logger.info(f"Filtered URLs: {filtered_urls}")
 
     snippets = []
     source_map = {}
-    for url in urls:
+    for url in filtered_urls:
         try:
             html = fetch_url(url)
+            if not html:
+                continue
             extracted = extract_snippets(html)
             if extracted:
                 snippets.extend(extracted)
