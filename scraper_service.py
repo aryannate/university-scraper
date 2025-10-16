@@ -57,13 +57,13 @@ KEYWORDS = ["GRE", "GMAT", "TOEFL", "IELTS", "GATE", "CAT", "SAT", "ACT",
             "work experience", "professional experience", "internship","annual fees","tuition fees"]
 
 # -------------------------------
-# Map universities to official domains for strict validation
+# Optional mapping of universities to official domains
 # -------------------------------
 UNIVERSITY_DOMAINS = {
     "Monash University": "monash.edu",
     "University of Washington": "uw.edu",
     "UH Manoa": "manoa.hawaii.edu",
-    # Add more universities as needed
+    # Add more universities optionally
 }
 
 # -------------------------------
@@ -152,23 +152,26 @@ async def scrape(req: Request):
 
     logger.info(f"Received request: {req_data.json()}")
 
-    university_domain = UNIVERSITY_DOMAINS.get(req_data.university)
-    if not university_domain:
-        logger.warning(f"No domain found for university {req_data.university}, proceeding without strict domain filtering.")
-        university_domain = ""
+    university_domain = UNIVERSITY_DOMAINS.get(req_data.university, "")
+    if university_domain:
+        query = f"site:{university_domain} \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
+    else:
+        query = f"\"{req_data.university}\" \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
 
-    query = f"site:{university_domain} \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
     try:
         urls = google_cse_search(query, num=req_data.max_results)
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search error: {e}")
 
-    # Filter URLs: must belong to university domain and skip PDFs
+    # Filter URLs dynamically: must contain university name if domain not specified, skip PDFs and irrelevant paths
     filtered_urls = []
+    uni_norm = req_data.university.lower().replace(" ", "")
     for url in urls:
         lower = url.lower()
         if university_domain and university_domain not in lower:
+            continue
+        elif not university_domain and uni_norm not in lower:
             continue
         if any(bad in lower for bad in ["login", "apply", "register", "contact"]):
             continue
