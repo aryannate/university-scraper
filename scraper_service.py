@@ -23,8 +23,8 @@ app = FastAPI()
 # CONFIG - replace placeholders
 # -------------------------------
 GOOGLE_CSE_API = "https://www.googleapis.com/customsearch/v1"
-GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY"  # replace with your key
-GOOGLE_CX = "YOUR_SEARCH_ENGINE_ID"     # replace with your search engine ID
+GOOGLE_API_KEY = "AIzaSyD5Cqp1faiTxm9DqKGgNDIxqnn1vaTszH0"  # replace with your key
+GOOGLE_CX = "54f975bde5a684412"     # replace with your search engine ID
 USER_AGENT = "Mozilla/5.0 (compatible; UniversityScraper/1.0)"
 
 headers = {"User-Agent": USER_AGENT}
