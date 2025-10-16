@@ -25,9 +25,8 @@ app = FastAPI()
 # -------------------------------
 GOOGLE_CSE_API = "https://www.googleapis.com/customsearch/v1"
 GOOGLE_API_KEY = "AIzaSyD5Cqp1faiTxm9DqKGgNDIxqnn1vaTszH0"  # replace with your key
-GOOGLE_CX = "54f975bde5a684412"     # replace with your search engine ID
+GOOGLE_CX = "54f975bde5a684412"           # replace with your search engine ID
 USER_AGENT = "Mozilla/5.0 (compatible; UniversityScraper/1.0)"
-
 headers = {"User-Agent": USER_AGENT}
 
 # -------------------------------
@@ -92,32 +91,39 @@ def fetch_url(url: str, timeout: int = 10) -> str:
 # -------------------------------
 KEYWORDS = ["GRE", "GMAT", "TOEFL", "IELTS", "English language", "admission requirement", "admissions requirements"]
 
-def extract_snippets(html_text: str) -> List[str]:
+def extract_snippets(html_text: str, max_snippets: int = 6) -> List[str]:
     soup = BeautifulSoup(html_text, "lxml")
     texts = []
+
     for tag in soup.find_all(['h1','h2','h3','h4','p','li','td']):
         t = tag.get_text(separator=" ", strip=True)
         if not t:
             continue
-        # Keep all text (no filtering)
-        texts.append(t)
-        sib = tag.find_next_sibling()
-        if sib:
-            s = sib.get_text(separator=" ", strip=True)
-            if s and len(s) < 1000:
-                texts.append(s)
-    # dedupe
+        if any(k.lower() in t.lower() for k in KEYWORDS):
+            # keep current tag
+            texts.append(t)
+            # add next sibling for context
+            sib = tag.find_next_sibling()
+            if sib:
+                s = sib.get_text(separator=" ", strip=True)
+                if s and len(s) < 1000:
+                    texts.append(s)
+        if len(texts) >= max_snippets:
+            break
+
+    # deduplicate
     unique = []
     for s in texts:
         if s not in unique:
             unique.append(s)
     logger.info(f"Extracted {len(unique)} snippets")
-    return unique
+    return unique[:max_snippets]
 
-NUM_RE = re.compile(r"\b(GRE|GMAT)\b[^0-9]{0,20}(\d{2,3})", re.IGNORECASE)
+# Regex for numeric scores
+NUM_RE = re.compile(r"\b(GRE|GMAT|TOEFL|IELTS)\b[^0-9]{0,20}(\d{2,3}(-\d{2,3})?)", re.IGNORECASE)
 
 # -------------------------------
-# Scrape endpoint with optional raw JSON parsing
+# Scrape endpoint
 # -------------------------------
 @app.post("/scrape", response_model=ScrapeResponse)
 async def scrape(req: Request):
@@ -143,7 +149,7 @@ async def scrape(req: Request):
         logger.info(f"Returning cached result for {cache_key}")
         return cached
 
-    query = f"site:.edu \"{req_data.university}\" \"{req_data.program}\" admissions GRE GMAT"
+    query = f"site:.edu \"{req_data.university}\" \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
     try:
         urls = google_cse_search(query, num=req_data.max_results)
     except Exception as e:
@@ -151,13 +157,16 @@ async def scrape(req: Request):
         raise HTTPException(status_code=500, detail=f"Search error: {e}")
 
     # -------------------------------
-    # RELAXED FILTER: Keep all .edu/.ac.* URLs
+    # Filter URLs to keep only relevant educational pages
     # -------------------------------
     def keep(url: str) -> bool:
-        return any(domain in url for domain in [".edu", ".ac.", ".edu.au", ".ac.uk", ".edu.ca"])
+        lower = url.lower()
+        if any(bad in lower for bad in ["login", "apply", "register", "contact"]):
+            return False
+        return any(domain in lower for domain in [".edu", ".ac.", ".edu.au", ".ac.uk", ".edu.ca"])
 
     urls = [u for u in urls if u and keep(u)]
-    logger.info(f"URLs after relaxed filtering: {urls}")
+    logger.info(f"Filtered URLs: {urls}")
 
     snippets = []
     source_map = {}
@@ -173,9 +182,9 @@ async def scrape(req: Request):
             continue
 
     result = {
-        "dataFound": bool(urls),
+        "dataFound": bool(snippets),
         "sourceURLs": list(source_map.keys()),
-        "snippets": snippets[:10],  # limit size
+        "snippets": snippets,
         "rawHTML": None
     }
 
