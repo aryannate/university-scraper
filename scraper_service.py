@@ -30,12 +30,10 @@ GOOGLE_CSE_API = "https://www.googleapis.com/customsearch/v1"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyD5Cqp1faiTxm9DqKGgNDIxqnn1vaTszH0")
 GOOGLE_CX = os.getenv("GOOGLE_CX", "54f975bde5a684412")
 
-# Optional proxy envs: HTTP_PROXY, HTTPS_PROXY, PROXY_LIST (comma-separated)
 HTTP_PROXY = os.getenv("HTTP_PROXY", "")
 HTTPS_PROXY = os.getenv("HTTPS_PROXY", "")
 PROXY_LIST = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
 
-# Browser-like headers pool
 HEADERS_POOL = [
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
@@ -73,7 +71,7 @@ class ScrapeRequest(BaseModel):
 class ScrapeResponse(BaseModel):
     dataFound: bool
     sourceURLs: List[str]
-    snippets: List[str]   # descriptive, program-specific and English-req snippets
+    snippets: List[str]   # single block string
     rawHTML: Optional[Dict] = None
 
 # -------------------------------
@@ -142,9 +140,8 @@ def http_get_text(url: str, timeout: int = 20, max_retries: int = 3, backoff: fl
     while attempt < max_retries:
         attempt += 1
         headers = choose_headers()
-        # Add a plausible referer when fetching course/admissions pages
         parsed = urlparse(url)
-        if "monash.edu" in parsed.netloc:
+        if "monash.edu" in parsed.netloc or "uw.edu" in parsed.netloc:
             headers.setdefault("Referer", f"https://{parsed.netloc}/")
         proxies = choose_proxies()
         try:
@@ -158,7 +155,6 @@ def http_get_text(url: str, timeout: int = 20, max_retries: int = 3, backoff: fl
         except requests.RequestException as e:
             logger.warning(f"Fetch error attempt {attempt} for {url}: {e}")
             time.sleep(backoff * attempt + random.uniform(0, 0.4))
-    # Give up after retries
     logger.warning(f"Giving up after {max_retries} attempts for {url}")
     return ""
 
@@ -184,9 +180,6 @@ def google_cse_search(queries: List[str], num: int = 5) -> List[str]:
     logger.info(f"CSE total unique URLs: {len(ranked)}")
     return ranked
 
-# -------------------------------
-# URL filtering and scoring
-# -------------------------------
 def is_same_domain(url: str, domain: str) -> bool:
     try:
         netloc = urlparse(url).netloc.lower()
@@ -226,9 +219,6 @@ def filter_and_rank_urls(urls: List[str], university: str, university_domain: Op
     ranked = sorted(filtered, key=lambda u: score_url(u, university_domain), reverse=True)
     return ranked[:limit]
 
-# -------------------------------
-# HTML snippet extraction
-# -------------------------------
 def extract_snippets(html_text: str, max_snippets: int = 12) -> List[str]:
     soup = BeautifulSoup(html_text, "lxml")
     snippets: List[str] = []
@@ -256,9 +246,6 @@ def extract_snippets(html_text: str, max_snippets: int = 12) -> List[str]:
     logger.info(f"Extracted {len(unique)} raw snippets")
     return unique[:max_snippets]
 
-# -------------------------------
-# English requirement normalization
-# -------------------------------
 def normalize_english_requirements(text_blocks: List[str]) -> List[str]:
     results: List[str] = []
     for t in text_blocks:
@@ -276,9 +263,6 @@ def normalize_english_requirements(text_blocks: List[str]) -> List[str]:
             seen.add(s)
     return final
 
-# -------------------------------
-# Study level and keyword strategy
-# -------------------------------
 def detect_study_level(program: str) -> str:
     p = program.lower()
     if "master" in p or "msc" in p or "ms " in p or "m.s" in p:
@@ -323,9 +307,6 @@ def build_queries(university: str, program: str, university_domain: Optional[str
     english_queries = english_terms[:max_results]
     return course_queries, english_queries
 
-# -------------------------------
-# Scrape pipeline
-# -------------------------------
 def discover_course_pages(university: str, program: str, university_domain: Optional[str], year: Optional[int], max_results: int) -> List[str]:
     course_queries, _ = build_queries(university, program, university_domain, year, max_results)
     urls = google_cse_search(course_queries, num=max_results)
@@ -406,16 +387,19 @@ async def scrape(req: Request):
         else:
             source_map[url] = blocks
 
+    # ----------- SINGLE BLOCK, ALL SNIPPETS MERGED -----------
     final_snippets: List[str] = []
     for url in course_urls:
         if url in course_sources:
             final_snippets.extend(course_sources[url])
     final_snippets.extend(english_snippets)
 
+    unified_output = "\n\n".join(final_snippets)
+
     result = {
         "dataFound": bool(final_snippets),
         "sourceURLs": list(source_map.keys()) or (course_urls + english_urls),
-        "snippets": final_snippets[: max(10, req_data.max_results * 3)],
+        "snippets": [unified_output],     # single block string, whole output in one element of list
         "rawHTML": None
     }
 
