@@ -135,12 +135,14 @@ def scrape(req: ScrapeRequest):
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search error: {e}")
 
-    # Filter URLs
+    # -------------------------------
+    # RELAXED FILTER: Keep all .edu/.ac.* URLs
+    # -------------------------------
     def keep(url: str) -> bool:
-        return any(domain in url for domain in [".edu", ".ac.", ".edu.au", ".ac.uk", ".edu.ca"]) and "apply" not in url.lower() and "login" not in url.lower()
+        return any(domain in url for domain in [".edu", ".ac.", ".edu.au", ".ac.uk", ".edu.ca"])
 
     urls = [u for u in urls if u and keep(u)]
-    logger.info(f"Filtered URLs: {urls}")
+    logger.info(f"URLs after relaxed filtering: {urls}")
 
     snippets = []
     source_map = {}
@@ -148,16 +150,16 @@ def scrape(req: ScrapeRequest):
         try:
             html = fetch_url(url)
             extracted = extract_snippets(html)
-            filtered = [s for s in extracted if re.search(r"\b(GRE|GMAT|IELTS|TOEFL)\b", s, re.I)]
-            if filtered:
-                snippets.extend(filtered)
-                source_map[url] = filtered
+            # use all extracted snippets, don't filter further
+            if extracted:
+                snippets.extend(extracted)
+                source_map[url] = extracted
         except Exception as e:
             logger.warning(f"Failed to fetch or parse {url}: {e}")
             continue
 
     result = {
-        "dataFound": bool(snippets),
+        "dataFound": bool(urls),  # True if any URL found
         "sourceURLs": list(source_map.keys()),
         "snippets": snippets[:10],  # limit size
         "rawHTML": None
