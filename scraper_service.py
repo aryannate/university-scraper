@@ -54,7 +54,7 @@ WORK_EXP_REGEX = re.compile(
 )
 KEYWORDS = ["GRE", "GMAT", "TOEFL", "IELTS", "GATE", "CAT", "SAT", "ACT", 
             "English language", "admission requirement", "admissions requirements",
-            "work experience", "professional experience", "internship"]
+            "work experience", "professional experience", "internship","annual fees","tuition fees"]
 
 # -------------------------------
 # Google CSE search
