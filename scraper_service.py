@@ -4,7 +4,6 @@ from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
 import re
-import time
 from typing import List, Optional, Dict
 import logging
 import json
@@ -25,7 +24,7 @@ app = FastAPI()
 # -------------------------------
 GOOGLE_CSE_API = "https://www.googleapis.com/customsearch/v1"
 GOOGLE_API_KEY = "AIzaSyD5Cqp1faiTxm9DqKGgNDIxqnn1vaTszH0"  # replace with your key
-GOOGLE_CX = "54f975bde5a684412"           # replace with your search engine ID
+GOOGLE_CX = "54f975bde5a684412"     # replace with your search engine ID
 USER_AGENT = "Mozilla/5.0 (compatible; UniversityScraper/1.0)"
 headers = {"User-Agent": USER_AGENT}
 
@@ -41,27 +40,21 @@ class ScrapeRequest(BaseModel):
 class ScrapeResponse(BaseModel):
     dataFound: bool
     sourceURLs: List[str]
-    snippets: List[str]   # cleaned text snippets (GRE/GMAT/IELTS passages)
+    snippets: List[str]   # descriptive, program-specific snippets
     rawHTML: Optional[Dict] = None
 
 # -------------------------------
-# Simple in-memory cache
+# Regex patterns for numeric scores
 # -------------------------------
-CACHE_TTL = 60 * 60 * 24  # 24 hours
-_cache = {}
-
-def cache_get(key: str):
-    record = _cache.get(key)
-    if not record: 
-        return None
-    ts, val = record
-    if time.time() - ts > CACHE_TTL:
-        del _cache[key]
-        return None
-    return val
-
-def cache_set(key: str, val: dict):
-    _cache[key] = (time.time(), val)
+EXAM_REGEX = re.compile(
+    r"\b(GRE|GMAT|TOEFL|IELTS|GATE|CAT|SAT|ACT)\b[^0-9]{0,20}(\d{2,3}(-\d{2,3})?)", re.IGNORECASE
+)
+WORK_EXP_REGEX = re.compile(
+    r"\b(work experience|professional experience|years of experience|internship requirement)\b[^.]{0,200}", re.IGNORECASE
+)
+KEYWORDS = ["GRE", "GMAT", "TOEFL", "IELTS", "GATE", "CAT", "SAT", "ACT", 
+            "English language", "admission requirement", "admissions requirements",
+            "work experience", "professional experience", "internship"]
 
 # -------------------------------
 # Google CSE search
@@ -69,7 +62,7 @@ def cache_set(key: str, val: dict):
 def google_cse_search(query: str, num: int = 5) -> List[str]:
     logger.info(f"Performing Google CSE search: {query}")
     params = {"q": query, "key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "num": num}
-    r = requests.get(GOOGLE_CSE_API, params=params, timeout=10, headers=headers)
+    r = requests.get(GOOGLE_CSE_API, params=params, timeout=15, headers=headers)
     r.raise_for_status()
     data = r.json()
     items = data.get("items", [])
@@ -81,46 +74,54 @@ def google_cse_search(query: str, num: int = 5) -> List[str]:
 # Fetch webpage
 # -------------------------------
 def fetch_url(url: str, timeout: int = 10) -> str:
+    if url.lower().endswith(".pdf"):
+        logger.info(f"Skipping PDF URL: {url}")
+        return ""
     logger.info(f"Fetching URL: {url}")
     r = requests.get(url, timeout=timeout, headers=headers)
     r.raise_for_status()
     return r.text
 
 # -------------------------------
-# Snippet extraction
+# Extract descriptive snippets
 # -------------------------------
-KEYWORDS = ["GRE", "GMAT", "TOEFL", "IELTS", "English language", "admission requirement", "admissions requirements"]
-
-def extract_snippets(html_text: str, max_snippets: int = 6) -> List[str]:
+def extract_snippets(html_text: str, max_snippets: int = 10) -> List[str]:
     soup = BeautifulSoup(html_text, "lxml")
-    texts = []
+    snippets = []
 
     for tag in soup.find_all(['h1','h2','h3','h4','p','li','td']):
-        t = tag.get_text(separator=" ", strip=True)
-        if not t:
+        text = tag.get_text(separator=" ", strip=True)
+        if not text:
             continue
-        if any(k.lower() in t.lower() for k in KEYWORDS):
-            # keep current tag
-            texts.append(t)
-            # add next sibling for context
+        if any(k.lower() in text.lower() for k in KEYWORDS):
+            # capture the line itself
+            snippet = text
+            # include next sibling for context
             sib = tag.find_next_sibling()
             if sib:
-                s = sib.get_text(separator=" ", strip=True)
-                if s and len(s) < 1000:
-                    texts.append(s)
-        if len(texts) >= max_snippets:
+                sib_text = sib.get_text(separator=" ", strip=True)
+                if sib_text and len(sib_text) < 1000:
+                    snippet += " " + sib_text
+            snippets.append(snippet)
+
+        if len(snippets) >= max_snippets:
             break
 
-    # deduplicate
-    unique = []
-    for s in texts:
-        if s not in unique:
-            unique.append(s)
-    logger.info(f"Extracted {len(unique)} snippets")
-    return unique[:max_snippets]
+    # Extract numeric exam scores
+    numeric_snippets = []
+    for snip in snippets:
+        exams = EXAM_REGEX.findall(snip)
+        work_exp = WORK_EXP_REGEX.findall(snip)
+        if exams or work_exp:
+            numeric_snippets.append(snip)
 
-# Regex for numeric scores
-NUM_RE = re.compile(r"\b(GRE|GMAT|TOEFL|IELTS)\b[^0-9]{0,20}(\d{2,3}(-\d{2,3})?)", re.IGNORECASE)
+    # deduplicate
+    unique_snippets = []
+    for s in numeric_snippets:
+        if s not in unique_snippets:
+            unique_snippets.append(s)
+    logger.info(f"Extracted {len(unique_snippets)} descriptive snippets")
+    return unique_snippets[:max_snippets]
 
 # -------------------------------
 # Scrape endpoint
@@ -143,12 +144,6 @@ async def scrape(req: Request):
 
     logger.info(f"Received request: {req_data.json()}")
 
-    cache_key = f"{req_data.university}|{req_data.program}"
-    cached = cache_get(cache_key)
-    if cached:
-        logger.info(f"Returning cached result for {cache_key}")
-        return cached
-
     query = f"site:.edu \"{req_data.university}\" \"{req_data.program}\" admissions GRE GMAT TOEFL IELTS"
     try:
         urls = google_cse_search(query, num=req_data.max_results)
@@ -156,12 +151,12 @@ async def scrape(req: Request):
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail=f"Search error: {e}")
 
-    # -------------------------------
-    # Filter URLs to keep only relevant educational pages
-    # -------------------------------
+    # Keep only relevant educational pages, skip PDFs
     def keep(url: str) -> bool:
         lower = url.lower()
         if any(bad in lower for bad in ["login", "apply", "register", "contact"]):
+            return False
+        if lower.endswith(".pdf"):
             return False
         return any(domain in lower for domain in [".edu", ".ac.", ".edu.au", ".ac.uk", ".edu.ca"])
 
@@ -188,6 +183,5 @@ async def scrape(req: Request):
         "rawHTML": None
     }
 
-    cache_set(cache_key, result)
-    logger.info(f"Returning result for {cache_key}, dataFound={result['dataFound']}")
+    logger.info(f"Returning result for {req_data.university}|{req_data.program}, dataFound={result['dataFound']}")
     return result
