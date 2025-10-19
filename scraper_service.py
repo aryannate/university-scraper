@@ -13,6 +13,29 @@ import time
 from urllib.parse import urlparse
 
 # -------------------------------
+# Browser automation fallback
+# -------------------------------
+from playwright.sync_api import sync_playwright
+
+def fetch_with_playwright(url, timeout=60):
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/127.0.0.0 Safari/537.36",
+                locale="en-US",
+            )
+            page = context.new_page()
+            page.goto(url, timeout=timeout * 1000)
+            page.wait_for_load_state("networkidle")
+            html = page.content()
+            browser.close()
+            return html
+    except Exception as e:
+        logger.warning(f"Playwright failed for {url}: {e}")
+        return ""
+
+# -------------------------------
 # Logging setup
 # -------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -109,7 +132,7 @@ UNIVERSITY_DOMAINS = {
 }
 
 # -------------------------------
-# HTTP helpers with retries and proxies
+# HTTP helpers with retries and proxies, now with browser fallback
 # -------------------------------
 def choose_headers() -> Dict[str, str]:
     return random.choice(HEADERS_POOL).copy()
@@ -137,6 +160,7 @@ def http_get_text(url: str, timeout: int = 20, max_retries: int = 3, backoff: fl
         logger.info(f"Skipping PDF URL: {url}")
         return ""
     attempt = 0
+    got_403 = False
     while attempt < max_retries:
         attempt += 1
         headers = choose_headers()
@@ -148,6 +172,7 @@ def http_get_text(url: str, timeout: int = 20, max_retries: int = 3, backoff: fl
             r = requests.get(url, timeout=timeout, headers=headers, proxies=proxies, allow_redirects=True)
             if r.status_code == 403:
                 logger.warning(f"403 on attempt {attempt} for {url}")
+                got_403 = True
                 time.sleep(backoff * attempt + random.uniform(0, 0.4))
                 continue
             r.raise_for_status()
@@ -155,11 +180,17 @@ def http_get_text(url: str, timeout: int = 20, max_retries: int = 3, backoff: fl
         except requests.RequestException as e:
             logger.warning(f"Fetch error attempt {attempt} for {url}: {e}")
             time.sleep(backoff * attempt + random.uniform(0, 0.4))
+    # If repeated 403s (or all failed attempts), try Playwright headless browser
+    if got_403:
+        logger.info(f"Trying headless browser for {url} after 403s")
+        html = fetch_with_playwright(url)
+        if html:
+            return html
     logger.warning(f"Giving up after {max_retries} attempts for {url}")
     return ""
 
 # -------------------------------
-# Google CSE search
+# Google CSE search and all original logic unchanged
 # -------------------------------
 def google_cse_search(queries: List[str], num: int = 5) -> List[str]:
     seen = set()
@@ -399,7 +430,7 @@ async def scrape(req: Request):
     result = {
         "dataFound": bool(final_snippets),
         "sourceURLs": list(source_map.keys()) or (course_urls + english_urls),
-        "snippets": [unified_output],     # single block string, whole output in one element of list
+        "snippets": [unified_output],
         "rawHTML": None
     }
 
